@@ -1,0 +1,114 @@
+kind: pipeline
+type: docker # 使用docker
+name: build
+clone:
+  tags: true
+  skip_verify: true
+volumes:
+  - name: cache
+    host:
+      path: /tmp/web-drone-node_modules-cache
+
+steps:
+
+  # 还原缓存
+  - name: restore-cache
+    image: drillster/drone-volume-cache
+    settings:
+      restore: true
+      mount:
+        - ./node_modules
+    volumes:
+      - name: cache
+        path: /cache
+
+  - name: npm-login
+    image: robertstettner/drone-npm-auth
+    settings:
+      registry: https://npm.mwjz.live/
+      username:
+        from_secret: npm_username
+      password:
+        from_secret: npm_password
+      email:
+        from_secret: npm_email
+  # 安装依赖
+  - name: install
+    image: node
+    depends_on: [npm-login]
+    commands:
+      - npm install --legacy-peer-deps
+
+  # 打包前端
+  - name: build-dist
+    image: node
+    depends_on: [install]
+    commands:
+      - npm run build
+
+  # 更新缓存
+  - name: rebuild-cache
+    image: drillster/drone-volume-cache
+    depends_on: [install]
+    settings:
+      rebuild: true
+      mount:
+        - ./node_modules
+    volumes:
+      - name: cache
+        path: /cache
+    when:
+      status:
+        - success
+
+  # 打包镜像
+  - name: build-image
+    image: plugins/docker
+    depends_on: [build-dist]
+    settings:
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      repo: docker.mwjz.live/mwjz/web
+      registry: docker.mwjz.live
+      # insecure: true
+      tags:
+        - latest
+        # - '0.0.9'
+---
+kind: pipeline
+type: docker
+name: deploy
+clone:
+  disable: true
+# image_pull_secrets:
+#   - dockerconfig
+steps:
+  - name: deploy
+    image: appleboy/drone-ssh
+    settings:
+      host:
+        from_secret: server_host
+      user:
+        from_secret: server_username
+      password:
+        from_secret: server_password
+      port: 22
+      # insecure: true
+      command_timeout: 2m
+      script:
+        - echo ====开始获取新镜像=======
+        - docker pull docker.mwjz.live/mwjz/web
+        - echo ====开始暂停和删除旧容器=======
+        - docker stop mwjz-web
+        - docker rm mwjz-web
+        - docker rmi `docker image ls -f dangling=true -q`
+        - echo ====开始运行新容器
+        - docker run --name mwjz-web -p 3333:80  -itd  docker.mwjz.live/mwjz/web
+        - echo ====部署成功=======
+trigger:
+  status:
+    - success
+depends_on:
+  - build
